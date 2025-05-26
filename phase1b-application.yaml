@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Phase 1b - Auto Scaling Setup for WordPress Application
+
+Parameters:
+  NetworkStackName:
+    Type: String
+    Description: SIT706-Phase1-Network
+  # Name of the deployed network stack (VPC and subnets)
+
+  ApplicationStackName:
+    Type: String
+    Description: SIT706-Phase1a-Application
+  # Reference name for the application layer stack
+
+  WordPressAMIID:
+    Type: String
+    Description: ami-0999c50870b1cfa75
+  # AMI ID of the pre-configured WordPress instance with S3 offload
+
+  ServerInstanceProfile:
+    Type: String
+    Default: LabInstanceProfile
+  # IAM Instance Profile allowing access to S3 and monitoring services
+
+Resources:
+
+  # Launch configuration based on the custom WordPress AMI
+  WordPressLaunchTemplate:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !Ref WordPressAMIID
+      InstanceType: t2.micro
+      KeyName:
+        Fn::ImportValue: !Sub "${ApplicationStackName}-WordpressServerKeyPair"
+      SecurityGroups:
+        - Fn::ImportValue: !Sub "${ApplicationStackName}-AutoScaleWordpressServerSecurityGroup"
+      IamInstanceProfile: !Ref ServerInstanceProfile
+
+  # Auto Scaling Group setup for maintaining and scaling WordPress instances
+  WordPressASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref WordPressLaunchTemplate
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnet1ExportId"
+        - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnet2ExportId"
+      TargetGroupARNs:
+        - Fn::ImportValue: !Sub "${ApplicationStackName}-ALBTargetGroup"
+      Tags:
+        - Key: Name
+          Value: WordPressAutoInstance
+          PropagateAtLaunch: true
+
+  # Scaling policy to increase capacity during high CPU usage
+  ScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WordPressASG
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: 1
+
+  # Scaling policy to reduce capacity during low CPU usage
+  ScaleInPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref WordPressASG
+      AdjustmentType: ChangeInCapacity
+      ScalingAdjustment: -1
+
+  # CloudWatch alarm to trigger scale-out
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Trigger scale-out on high CPU utilization"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WordPressASG
+      Statistic: Average
+      Period: 180
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref ScaleOutPolicy
+
+  # CloudWatch alarm to trigger scale-in
+  CPUAlarmLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Trigger scale-in on low CPU utilization"
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref WordPressASG
+      Statistic: Average
+      Period: 180
+      EvaluationPeriods: 1
+      Threshold: 25
+      ComparisonOperator: LessThanThreshold
+      AlarmActions:
+        - !Ref ScaleInPolicy
+
+Outputs:
+
+  AutoScalingGroupExport:
+    Value: !Ref WordPressASG
+    Export:
+      Name: !Sub "${AWS::StackName}-AutoScalingGroup"
